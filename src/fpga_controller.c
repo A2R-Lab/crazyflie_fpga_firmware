@@ -51,6 +51,8 @@ static uint8_t txBuffer[TX_LEN] = {0};
 static uint8_t dummyBuffer[RX_LEN] = {0};
 
 static uint64_t runTimes = 0;
+static bool yawSetpointInitialized = false;
+static float yawSetpointDeg = 0.0f;
 
 void appMain() {
     DEBUG_PRINT("FPGA Controller app started.\n");
@@ -92,6 +94,8 @@ void controllerOutOfTreeInit(void) {
     DEBUG_PRINT("Dummy transaction sent.\n");
 
     controllerPidInit();
+    yawSetpointInitialized = false;
+    yawSetpointDeg = 0.0f;
 
     fpgaControllerInitialized = true;   
 }
@@ -114,10 +118,65 @@ static inline quaternion_t normalize_quat(quaternion_t q)
 static inline struct vec quat_2_rp(quaternion_t q)
 {
   struct vec v;
+  if (fabsf(q.w) < 1e-6f) {
+    v.x = 0.0f;
+    v.y = 0.0f;
+    v.z = 0.0f;
+    return v;
+  }
   v.x = q.x / q.w;
   v.y = q.y / q.w;
   v.z = q.z / q.w;
   return v;
+}
+
+static inline quaternion_t quat_mul(quaternion_t a, quaternion_t b)
+{
+  quaternion_t q;
+  q.w = a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z;
+  q.x = a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y;
+  q.y = a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x;
+  q.z = a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w;
+  return q;
+}
+
+static inline float capAngleDeg(float angleDeg)
+{
+  while (angleDeg > 180.0f) {
+    angleDeg -= 360.0f;
+  }
+  while (angleDeg < -180.0f) {
+    angleDeg += 360.0f;
+  }
+  return angleDeg;
+}
+
+static float quat_to_yaw_deg(quaternion_t q)
+{
+  quaternion_t n = normalize_quat(q);
+  const float sinyCosp = 2.0f * (n.w * n.z + n.x * n.y);
+  const float cosyCosp = 1.0f - 2.0f * (n.y * n.y + n.z * n.z);
+  return degrees(atan2f(sinyCosp, cosyCosp));
+}
+
+static float updateYawSetpointDeg(const setpoint_t *setpoint, const state_t *state)
+{
+  /* Keep a local yaw setpoint for modeVelocity, like the stock PID controller. */
+  if (!yawSetpointInitialized) {
+    yawSetpointDeg = state->attitude.yaw;
+    yawSetpointInitialized = true;
+  }
+
+  if (setpoint->mode.yaw == modeVelocity) {
+    yawSetpointDeg = capAngleDeg(yawSetpointDeg + setpoint->attitudeRate.yaw * (1.0f / 500.0f));
+  } else if (setpoint->mode.yaw == modeAbs) {
+    yawSetpointDeg = setpoint->attitude.yaw;
+  } else if (setpoint->mode.quat == modeAbs) {
+    yawSetpointDeg = quat_to_yaw_deg(setpoint->attitudeQuaternion);
+  }
+
+  yawSetpointDeg = capAngleDeg(yawSetpointDeg);
+  return yawSetpointDeg;
 }
 
 void float_to_32bit_fixed_at(float value, uint8_t *buf, size_t offset)
@@ -154,9 +213,16 @@ float fixed_32bit_to_float_at(const uint8_t *buf, size_t offset)
 
 void stateToTxBuffer(const setpoint_t *setpoint, const state_t *state, const sensorData_t *sensors, uint8_t *buffer) {
 
-    // ToDo difference from setpoint
-
-    struct vec phi = quat_2_rp(normalize_quat(state->attitudeQuaternion)); // quaternion to Rodrigues parameters
+    const float desiredYawRad = radians(updateYawSetpointDeg(setpoint, state));
+    const quaternion_t qState = normalize_quat(state->attitudeQuaternion);
+    const quaternion_t qDesiredYawConj = {
+        .x = 0.0f,
+        .y = 0.0f,
+        .z = -sinf(0.5f * desiredYawRad),
+        .w = cosf(0.5f * desiredYawRad)
+    };
+    const quaternion_t qError = normalize_quat(quat_mul(qDesiredYawConj, qState));
+    struct vec phi = quat_2_rp(qError); // Rodrigues parameters of attitude error wrt desired yaw
     // DEBUG_PRINT("phi: (%.2f, %.2f, %.2f)\n", (double)phi.x, (double)phi.y, (double)phi.z);
 
     buffer[0] = 0x00;
