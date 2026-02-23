@@ -196,6 +196,12 @@ void controllerOutOfTree(control_t *control,
     if(!fpgaControllerInitialized) {
         return;
     }
+
+    if(!RATE_DO_EXECUTE(RATE_500_HZ, tick))
+    {
+        return;
+    }
+
     runTimes++;
 
     stateToTxBuffer(setpoint, state, sensors, txBuffer);
