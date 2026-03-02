@@ -38,13 +38,6 @@
 #define RX_LEN  (4 * 4)
 
 
-#define FRAC_BITS 22
-#define SCALE     (1 << FRAC_BITS)
-
-/* 32-bit signed range for Q10.22: full int32 range (~ -1024 to +1024 in value) */
-#define FP32_MIN  INT32_MIN
-#define FP32_MAX  INT32_MAX
-
 static bool fpgaControllerInitialized = false;
 static uint8_t emptyBuffer[TX_LEN] = {0};
 static uint8_t txBuffer[TX_LEN] = {0};
@@ -179,36 +172,16 @@ static float updateYawSetpointDeg(const setpoint_t *setpoint, const state_t *sta
   return yawSetpointDeg;
 }
 
-void float_to_32bit_fixed_at(float value, uint8_t *buf, size_t offset)
+void float_to_32bit_at(float value, uint8_t *buf, size_t offset)
 {
-    double scaled = (double)value * (double)SCALE;
-    int32_t fp32;
-
-    if (scaled <= (double)FP32_MIN) {
-        fp32 = FP32_MIN;
-    } else if (scaled >= (double)FP32_MAX) {
-        fp32 = FP32_MAX;
-    } else {
-        fp32 = (int32_t)(scaled < 0 ? scaled - 0.5 : scaled + 0.5);
-    }
-
-    uint32_t u = (uint32_t)fp32;
-    buf[offset + 0] = (uint8_t)(u >> 24);
-    buf[offset + 1] = (uint8_t)(u >> 16);
-    buf[offset + 2] = (uint8_t)(u >>  8);
-    buf[offset + 3] = (uint8_t)(u >>  0);
+    memcpy(&buf[offset], &value, sizeof(float));
 }
 
 float fixed_32bit_to_float_at(const uint8_t *buf, size_t offset)
 {
-    /* 32-bit little-endian */
-    uint32_t u32 = ((uint32_t)buf[offset]     << 24)
-                 | ((uint32_t)buf[offset + 1] << 16)
-                 | ((uint32_t)buf[offset + 2] <<  8)
-                 | ((uint32_t)buf[offset + 3] <<  0);
-
-    int32_t s32 = (int32_t)u32;
-    return (float)s32 * (1.0f / (float)SCALE);
+    float value;
+    memcpy(&value, &buf[offset], sizeof(float));
+    return value;
 }
 
 void stateToTxBuffer(const setpoint_t *setpoint, const state_t *state, const sensorData_t *sensors, uint8_t *buffer) {
@@ -223,27 +196,24 @@ void stateToTxBuffer(const setpoint_t *setpoint, const state_t *state, const sen
     };
     const quaternion_t qError = normalize_quat(quat_mul(qDesiredYawConj, qState));
     struct vec phi = quat_2_rp(qError); // Rodrigues parameters of attitude error wrt desired yaw
-    // DEBUG_PRINT("phi: (%.2f, %.2f, %.2f)\n", (double)phi.x, (double)phi.y, (double)phi.z);
 
     buffer[0] = 0x00;
     buffer[1] = 0x00;
     buffer[2] = 0x00;
     buffer[3] = 0xAA;
 
-    
-// x=-0.036 y=-0.203 z=0.499
-    float_to_32bit_fixed_at(state->position.x - setpoint->position.x, buffer, 4);
-    float_to_32bit_fixed_at(state->position.y - setpoint->position.y, buffer, 8);
-    float_to_32bit_fixed_at(state->position.z - setpoint->position.z, buffer, 12); // ToDo  tmp hover at 1m height
-    float_to_32bit_fixed_at(phi.x, buffer, 16);
-    float_to_32bit_fixed_at(phi.y, buffer, 20);
-    float_to_32bit_fixed_at(phi.z, buffer, 24);
-    float_to_32bit_fixed_at(state->velocity.x, buffer, 28);
-    float_to_32bit_fixed_at(state->velocity.y, buffer, 32);
-    float_to_32bit_fixed_at(state->velocity.z, buffer, 36);
-    float_to_32bit_fixed_at(radians(sensors->gyro.x), buffer, 40);
-    float_to_32bit_fixed_at(radians(sensors->gyro.y), buffer, 44);
-    float_to_32bit_fixed_at(radians(sensors->gyro.z), buffer, 48);
+    float_to_32bit_at(state->position.x - setpoint->position.x, buffer, 4);
+    float_to_32bit_at(state->position.y - setpoint->position.y, buffer, 8);
+    float_to_32bit_at(state->position.z - setpoint->position.z, buffer, 12);
+    float_to_32bit_at(phi.x, buffer, 16);
+    float_to_32bit_at(phi.y, buffer, 20);
+    float_to_32bit_at(phi.z, buffer, 24);
+    float_to_32bit_at(state->velocity.x, buffer, 28);
+    float_to_32bit_at(state->velocity.y, buffer, 32);
+    float_to_32bit_at(state->velocity.z, buffer, 36);
+    float_to_32bit_at(radians(sensors->gyro.x), buffer, 40);
+    float_to_32bit_at(radians(sensors->gyro.y), buffer, 44);
+    float_to_32bit_at(radians(sensors->gyro.z), buffer, 48);
 }
 
 void rxBufferToControl(const uint8_t *buffer, control_t *control) {
