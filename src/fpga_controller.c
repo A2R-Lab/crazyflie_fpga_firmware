@@ -248,10 +248,10 @@ void stateToTxBuffer(const setpoint_t *setpoint, const state_t *state, const sen
 
 void rxBufferToControl(const uint8_t *buffer, control_t *control) {
     control->controlMode = controlModeForce;
-    control->normalizedForces[0] = 0.58333335f + fixed_32bit_to_float_at(buffer, 0);
-    control->normalizedForces[1] = 0.58333335f + fixed_32bit_to_float_at(buffer, 4);
-    control->normalizedForces[2] = 0.58333335f + fixed_32bit_to_float_at(buffer, 8);
-    control->normalizedForces[3] = 0.58333335f + fixed_32bit_to_float_at(buffer, 12);
+    control->normalizedForces[0] = 0.62f + fixed_32bit_to_float_at(buffer, 0);
+    control->normalizedForces[1] = 0.62f + fixed_32bit_to_float_at(buffer, 4);
+    control->normalizedForces[2] = 0.62f + fixed_32bit_to_float_at(buffer, 8);
+    control->normalizedForces[3] = 0.62f + fixed_32bit_to_float_at(buffer, 12);
 }
 
 void controllerOutOfTree(control_t *control,
