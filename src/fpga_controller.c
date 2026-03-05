@@ -50,6 +50,7 @@ static uint8_t emptyBuffer[TX_LEN] = {0};
 static uint8_t txBuffer[TX_LEN] = {0};
 static uint8_t dummyBuffer[RX_LEN] = {0};
 
+static uint8_t fpgaInitCalled = 0;
 static uint64_t runTimes = 0;
 static bool yawSetpointInitialized = false;
 static float yawSetpointDeg = 0.0f;
@@ -66,6 +67,8 @@ void appMain() {
 // Out-of-Tree Controller Interface
 //--------------------------------------------------------------
 void controllerOutOfTreeInit(void) {
+    fpgaInitCalled++;
+    runTimes = 0;
     if(fpgaControllerInitialized) {
         DEBUG_PRINT("FPGA out-of-tree controller already initialized, skipping.\n");
         return;
@@ -271,6 +274,7 @@ void controllerOutOfTree(control_t *control,
     runTimes++;
 
     stateToTxBuffer(setpoint, state, sensors, txBuffer);
+    if(fpgaInitCalled > 2 && runTimes > 500) txBuffer[2] = 0x01;
   
     // uint64_t start = usecTimestamp();
 
