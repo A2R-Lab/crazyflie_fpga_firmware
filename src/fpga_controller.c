@@ -54,6 +54,20 @@ static uint8_t fpgaInitCalled = 0;
 static uint64_t runTimes = 0;
 static bool yawSetpointInitialized = false;
 static float yawSetpointDeg = 0.0f;
+static float loggedU[4] = {0.0f};
+static int16_t loggedU16[4] = {0};
+
+static int16_t floatToInt16Saturated(const float value)
+{
+  const float scaled = value * 32767.0f;
+  if (scaled > 32767.0f) {
+    return INT16_MAX;
+  }
+  if (scaled < -32768.0f) {
+    return INT16_MIN;
+  }
+  return (int16_t)lrintf(scaled);
+}
 
 void appMain() {
     DEBUG_PRINT("FPGA Controller app started.\n");
@@ -251,10 +265,11 @@ void stateToTxBuffer(const setpoint_t *setpoint, const state_t *state, const sen
 
 void rxBufferToControl(const uint8_t *buffer, control_t *control) {
     control->controlMode = controlModeForce;
-    control->normalizedForces[0] = 0.62f + fixed_32bit_to_float_at(buffer, 0);
-    control->normalizedForces[1] = 0.62f + fixed_32bit_to_float_at(buffer, 4);
-    control->normalizedForces[2] = 0.62f + fixed_32bit_to_float_at(buffer, 8);
-    control->normalizedForces[3] = 0.62f + fixed_32bit_to_float_at(buffer, 12);
+    for (int i = 0; i < 4; i++) {
+      loggedU[i] = fixed_32bit_to_float_at(buffer, 4 * i);
+      control->normalizedForces[i] = 0.62f + loggedU[i];
+      loggedU16[i] = floatToInt16Saturated(control->normalizedForces[i]);
+    }
 }
 
 void controllerOutOfTree(control_t *control,
@@ -324,9 +339,12 @@ void controllerOutOfTree(control_t *control,
 // Logging Variables
 //--------------------------------------------------------------
 
-// LOG_GROUP_START(fpga)
-// LOG_ADD(LOG_UINT8, init, &fpgaInitialized)
-// LOG_GROUP_STOP(fpga)
+LOG_GROUP_START(fpga)
+LOG_ADD(LOG_INT16, u1_16, &loggedU16[0])
+LOG_ADD(LOG_INT16, u2_16, &loggedU16[1])
+LOG_ADD(LOG_INT16, u3_16, &loggedU16[2])
+LOG_ADD(LOG_INT16, u4_16, &loggedU16[3])
+LOG_GROUP_STOP(fpga)
 //--------------------------------------------------------------
 // Parameters
 //--------------------------------------------------------------
