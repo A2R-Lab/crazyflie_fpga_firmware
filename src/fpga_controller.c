@@ -45,10 +45,14 @@
 #define FP32_MIN  INT32_MIN
 #define FP32_MAX  INT32_MAX
 
+#define DMA_ALIGNED __attribute__((aligned(4)))
+
 static bool fpgaControllerInitialized = false;
-static uint8_t emptyBuffer[TX_LEN] = {0};
-static uint8_t txBuffer[TX_LEN] = {0};
-static uint8_t dummyBuffer[RX_LEN] = {0};
+/* SPI uses DMA, so these buffers must stay in regular SRAM (.bss), not CCM or stack. */
+static uint8_t emptyBuffer[TX_LEN] DMA_ALIGNED = {0};
+static uint8_t txBuffer[TX_LEN] DMA_ALIGNED = {0};
+static uint8_t rxBuffer[RX_LEN] DMA_ALIGNED = {0};
+static uint8_t rxDiscardBuffer[TX_LEN] DMA_ALIGNED = {0};
 
 static uint8_t fpgaInitCalled = 0;
 static uint64_t runTimes = 0;
@@ -104,10 +108,11 @@ void controllerOutOfTreeInit(void) {
     
     digitalWrite(FPGA_CS_PIN, LOW);
 
-    uint8_t localTxBuffer[TX_LEN] = {0}; localTxBuffer[3] = 0xAA; 
-    uint8_t localRxBuffer[TX_LEN];
+    static uint8_t initTxBuffer[TX_LEN] DMA_ALIGNED = {0};
+    static uint8_t initRxBuffer[TX_LEN] DMA_ALIGNED = {0};
+    initTxBuffer[3] = 0xAA;
 
-    spiExchange(TX_LEN, localTxBuffer, localRxBuffer);
+    spiExchange(TX_LEN, initTxBuffer, initRxBuffer);
     DEBUG_PRINT("Dummy transaction sent.\n");
 
     controllerPidInit();
@@ -218,7 +223,7 @@ void float_to_32bit_fixed_at(float value, uint8_t *buf, size_t offset)
 
 float fixed_32bit_to_float_at(const uint8_t *buf, size_t offset)
 {
-    /* 32-bit little-endian */
+    /* 32-bit big-endian */
     uint32_t u32 = ((uint32_t)buf[offset]     << 24)
                  | ((uint32_t)buf[offset + 1] << 16)
                  | ((uint32_t)buf[offset + 2] <<  8)
@@ -267,7 +272,8 @@ void rxBufferToControl(const uint8_t *buffer, control_t *control) {
     control->controlMode = controlModeForce;
     for (int i = 0; i < 4; i++) {
       loggedU[i] = fixed_32bit_to_float_at(buffer, 4 * i);
-      control->normalizedForces[i] = 0.62f + loggedU[i];
+      /* FPGA already includes hover thrust (U_HOVER) */
+      control->normalizedForces[i] = loggedU[i];
       loggedU16[i] = floatToInt16Saturated(control->normalizedForces[i]);
     }
 }
@@ -298,7 +304,7 @@ void controllerOutOfTree(control_t *control,
             break;
         }
     }
-    uint8_t rxBuffer[RX_LEN] = {0};
+    memset(rxBuffer, 0, sizeof(rxBuffer));
 
 
     for(int i = 0; i < 1000; i++) {
@@ -309,7 +315,7 @@ void controllerOutOfTree(control_t *control,
         }
     }
     /* Consume the remaining 3 bytes of the 32-bit ready word (0xFF 0xFF 0xFF 0xFF) */
-    spiExchange(3, emptyBuffer, dummyBuffer);
+    spiExchange(3, emptyBuffer, rxDiscardBuffer);
 
     spiExchange(RX_LEN, emptyBuffer, rxBuffer);
 
@@ -317,7 +323,7 @@ void controllerOutOfTree(control_t *control,
     sleepus(1);
     digitalWrite(FPGA_CS_PIN, LOW);
 
-    spiExchange(TX_LEN, txBuffer, dummyBuffer);
+    spiExchange(TX_LEN, txBuffer, rxDiscardBuffer);
 
     // uint64_t end = usecTimestamp();
 
