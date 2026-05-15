@@ -32,8 +32,8 @@
 #define FPGA_IRQ_PIN      DECK_GPIO_IO2
 #define FPGA_SPI_BAUDRATE SPI_BAUDRATE_12MHZ
 
-/* 4-byte header + 12 state words × 4 bytes */
-#define TX_LEN  (4 + 12 * 4)
+/* 4-byte header + 12 state words × 4 bytes + 4 bytes dynamic constraints */
+#define TX_LEN  (4 + 12 * 4 + 4)
 /* 4 control outputs × 4 bytes */
 #define RX_LEN  (4 * 4)
 
@@ -60,6 +60,30 @@ static bool yawSetpointInitialized = false;
 static float yawSetpointDeg = 0.0f;
 static float loggedU[4] = {0.0f};
 static int16_t loggedU16[4] = {0};
+static setpoint_t lastValidSetpoint = {0};
+static bool lastValidSetpointAvailable = false;
+
+/* Dynamic constraints and commands */
+static uint32_t dynamicConstraints = 0;
+static bool trajStartRequested = false;
+static bool trajResetRequested = false;
+static bool constraintsActive = false;
+static int16_t worldMinX_mm = 0;
+static int16_t worldMaxX_mm = 0;
+static uint32_t lastCommandXBits = 0;
+static uint32_t lastCommandYBits = 0;
+static uint32_t commandSeenCount = 0;
+static bool constraintsWereActive = false;
+
+/* Command protocol constants */
+#define CMD_MAGIC_MASK  0xC0000000
+#define CMD_MAGIC_VAL   0xC0000000 // Top 2 bits = 0b11
+#define CMD_TYPE_MASK   0x30000000
+#define CMD_TYPE_SHIFT  28
+
+#define CMD_START_TRAJ     1
+#define CMD_RESET_TRAJ     2
+#define CMD_SET_CONSTRAINTS 3
 
 static int16_t floatToInt16Saturated(const float value)
 {
@@ -118,6 +142,7 @@ void controllerOutOfTreeInit(void) {
     controllerPidInit();
     yawSetpointInitialized = false;
     yawSetpointDeg = 0.0f;
+    lastValidSetpointAvailable = false;
 
     fpgaControllerInitialized = true;   
 }
@@ -266,6 +291,12 @@ void stateToTxBuffer(const setpoint_t *setpoint, const state_t *state, const sen
     float_to_32bit_fixed_at(radians(sensors->gyro.x), buffer, 40);
     float_to_32bit_fixed_at(radians(sensors->gyro.y), buffer, 44);
     float_to_32bit_fixed_at(radians(sensors->gyro.z), buffer, 48);
+
+    /* Append dynamic constraints at the end of the buffer (index 52-55) */
+    buffer[52] = (uint8_t)(dynamicConstraints >> 24);
+    buffer[53] = (uint8_t)(dynamicConstraints >> 16);
+    buffer[54] = (uint8_t)(dynamicConstraints >>  8);
+    buffer[55] = (uint8_t)(dynamicConstraints >>  0);
 }
 
 void rxBufferToControl(const uint8_t *buffer, control_t *control) {
@@ -294,8 +325,90 @@ void controllerOutOfTree(control_t *control,
 
     runTimes++;
 
-    stateToTxBuffer(setpoint, state, sensors, txBuffer);
-    if(fpgaInitCalled > 2 && runTimes > 500) txBuffer[2] = 0x01;
+    // Parse external commands from setpoint multiplexing
+    uint32_t x_bits, y_bits;
+    bool isCommandPacket = false;
+    memcpy(&x_bits, &setpoint->position.x, 4);
+    memcpy(&y_bits, &setpoint->position.y, 4);
+
+    if (((x_bits & CMD_MAGIC_MASK) == CMD_MAGIC_VAL) &&
+        ((y_bits & CMD_MAGIC_MASK) == CMD_MAGIC_VAL)) {
+        isCommandPacket = true;
+        lastCommandXBits = x_bits;
+        lastCommandYBits = y_bits;
+        commandSeenCount++;
+
+        uint8_t cmdType = (x_bits & CMD_TYPE_MASK) >> CMD_TYPE_SHIFT;
+        if (cmdType == CMD_START_TRAJ) {
+            trajStartRequested = true;
+            trajResetRequested = false;
+            DEBUG_PRINT("CMD: START TRAJECTORY\n");
+        } else if (cmdType == CMD_RESET_TRAJ) {
+            trajStartRequested = false;
+            trajResetRequested = true;
+            DEBUG_PRINT("CMD: RESET TRAJECTORY\n");
+        } else if (cmdType == CMD_SET_CONSTRAINTS) {
+            /* We extract the lower 16 bits of x and y as world-frame X boundaries (in mm) */
+            worldMinX_mm = (int16_t)(x_bits & 0x0000FFFF);
+            worldMaxX_mm = (int16_t)(y_bits & 0x0000FFFF);
+
+            if (worldMinX_mm == 0 && worldMaxX_mm == 0) {
+                constraintsActive = false;
+                dynamicConstraints = 0;
+                if (constraintsWereActive) {
+                    DEBUG_PRINT("CMD: CONSTRAINTS DISABLED\n");
+                }
+            } else {
+                constraintsActive = true;
+                if (!constraintsWereActive) {
+                    DEBUG_PRINT("CMD: CONSTRAINTS ENABLED\n");
+                }
+            }
+            constraintsWereActive = constraintsActive;
+        }
+    }
+
+    if (!isCommandPacket) {
+        lastValidSetpoint = *setpoint;
+        lastValidSetpointAvailable = true;
+    }
+
+    const setpoint_t *effectiveSetpoint = setpoint;
+    if (isCommandPacket && lastValidSetpointAvailable) {
+        effectiveSetpoint = &lastValidSetpoint;
+    } else if (isCommandPacket) {
+        DEBUG_PRINT("CMD: no cached setpoint available, using command packet as fallback\n");
+    }
+
+    /* Handle coordinate shifting: relative_boundary = world_boundary - current_setpoint */
+    if (constraintsActive) {
+        float setpointX_mm = effectiveSetpoint->position.x * 1000.0f;
+        int16_t relMinX = worldMinX_mm - (int16_t)setpointX_mm;
+        int16_t relMaxX = worldMaxX_mm - (int16_t)setpointX_mm;
+
+        /* Pack into the 32-bit word for the FPGA */
+        dynamicConstraints = ((uint16_t)relMinX) | (((uint32_t)(uint16_t)relMaxX) << 16);
+    }
+
+    stateToTxBuffer(effectiveSetpoint, state, sensors, txBuffer);
+
+    /* Apply commands to the header word of txBuffer */
+    if (trajStartRequested) txBuffer[2] |= 0x01;
+    if (trajResetRequested) txBuffer[2] |= 0x02;
+    if (trajStartRequested || trajResetRequested) {
+        DEBUG_PRINT("TX: hdr=%02X %02X %02X %02X start=%u reset=%u constraints=0x%08lX last_cmd=(0x%08lX,0x%08lX)\n",
+                    txBuffer[0],
+                    txBuffer[1],
+                    txBuffer[2],
+                    txBuffer[3],
+                    trajStartRequested ? 1 : 0,
+                    trajResetRequested ? 1 : 0,
+                    (unsigned long)dynamicConstraints,
+                    (unsigned long)lastCommandXBits,
+                    (unsigned long)lastCommandYBits);
+    }
+    trajStartRequested = false;
+    trajResetRequested = false;
   
     // uint64_t start = usecTimestamp();
 
