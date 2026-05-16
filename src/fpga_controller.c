@@ -32,6 +32,14 @@
 #define FPGA_IRQ_PIN      DECK_GPIO_IO2
 #define FPGA_SPI_BAUDRATE SPI_BAUDRATE_12MHZ
 
+/* Temporary firmware-only test mode:
+ * - Keep ROS/commander command decoding active.
+ * - Skip FPGA SPI transactions.
+ * - Clamp the PID x setpoint between received obstacle bounds.
+ */
+#define FPGA_BYPASS_TO_PID_TEST 0
+#define CONSTRAINT_LOG_PERIOD_MS 1000
+
 /* 4-byte header + 12 state words × 4 bytes + 4 bytes dynamic constraints */
 #define TX_LEN  (4 + 12 * 4 + 4)
 /* 4 control outputs × 4 bytes */
@@ -74,6 +82,8 @@ static uint32_t lastCommandXBits = 0;
 static uint32_t lastCommandYBits = 0;
 static uint32_t commandSeenCount = 0;
 static bool constraintsWereActive = false;
+static uint32_t lastConstraintLogTick = 0;
+static bool constraintLogHasRun = false;
 
 /* Command protocol constants */
 #define CMD_MAGIC_MASK  0xC0000000
@@ -97,6 +107,48 @@ static int16_t floatToInt16Saturated(const float value)
   return (int16_t)lrintf(scaled);
 }
 
+static float clampFloat(const float value, const float minValue, const float maxValue)
+{
+  if (value < minValue) {
+    return minValue;
+  }
+  if (value > maxValue) {
+    return maxValue;
+  }
+  return value;
+}
+
+static void logConstraintCommandThrottled(const bool constraintCommandReceived,
+                                          const int16_t relMinX,
+                                          const int16_t relMaxX,
+                                          const float requestedSetpointX,
+                                          const float clampedSetpointX)
+{
+  if (!constraintCommandReceived) {
+    return;
+  }
+
+  const uint32_t now = xTaskGetTickCount();
+  if (constraintLogHasRun && ((now - lastConstraintLogTick) < M2T(CONSTRAINT_LOG_PERIOD_MS))) {
+    return;
+  }
+
+  lastConstraintLogTick = now;
+  constraintLogHasRun = true;
+
+  DEBUG_PRINT("CONSTR: active=%u world=[%d,%d]mm rel=[%d,%d]mm pid_x=%ld->%ldmm cmd=(0x%08lX,0x%08lX) count=%lu\n",
+              constraintsActive ? 1 : 0,
+              (int)worldMinX_mm,
+              (int)worldMaxX_mm,
+              (int)relMinX,
+              (int)relMaxX,
+              (long)(requestedSetpointX * 1000.0f),
+              (long)(clampedSetpointX * 1000.0f),
+              (unsigned long)lastCommandXBits,
+              (unsigned long)lastCommandYBits,
+              (unsigned long)commandSeenCount);
+}
+
 void appMain() {
     DEBUG_PRINT("FPGA Controller app started.\n");
     
@@ -117,6 +169,16 @@ void controllerOutOfTreeInit(void) {
     }
     
     DEBUG_PRINT("FPGA out-of-tree controller init...\n");
+
+    if (FPGA_BYPASS_TO_PID_TEST) {
+        DEBUG_PRINT("FPGA PID bypass test mode enabled; SPI solver transactions disabled.\n");
+        controllerPidInit();
+        yawSetpointInitialized = false;
+        yawSetpointDeg = 0.0f;
+        lastValidSetpointAvailable = false;
+        fpgaControllerInitialized = true;
+        return;
+    }
     
     pinMode(FPGA_CS_PIN, OUTPUT);
     pinMode(FPGA_IRQ_PIN, INPUT_PULLDOWN);
@@ -328,6 +390,7 @@ void controllerOutOfTree(control_t *control,
     // Parse external commands from setpoint multiplexing
     uint32_t x_bits, y_bits;
     bool isCommandPacket = false;
+    bool constraintCommandReceived = false;
     memcpy(&x_bits, &setpoint->position.x, 4);
     memcpy(&y_bits, &setpoint->position.y, 4);
 
@@ -351,6 +414,7 @@ void controllerOutOfTree(control_t *control,
             /* We extract the lower 16 bits of x and y as world-frame X boundaries (in mm) */
             worldMinX_mm = (int16_t)(x_bits & 0x0000FFFF);
             worldMaxX_mm = (int16_t)(y_bits & 0x0000FFFF);
+            constraintCommandReceived = true;
 
             if (worldMinX_mm == 0 && worldMaxX_mm == 0) {
                 constraintsActive = false;
@@ -381,13 +445,42 @@ void controllerOutOfTree(control_t *control,
     }
 
     /* Handle coordinate shifting: relative_boundary = world_boundary - current_setpoint */
+    int16_t relMinX = 0;
+    int16_t relMaxX = 0;
     if (constraintsActive) {
         float setpointX_mm = effectiveSetpoint->position.x * 1000.0f;
-        int16_t relMinX = worldMinX_mm - (int16_t)setpointX_mm;
-        int16_t relMaxX = worldMaxX_mm - (int16_t)setpointX_mm;
+        relMinX = worldMinX_mm - (int16_t)setpointX_mm;
+        relMaxX = worldMaxX_mm - (int16_t)setpointX_mm;
 
         /* Pack into the 32-bit word for the FPGA */
         dynamicConstraints = ((uint16_t)relMinX) | (((uint32_t)(uint16_t)relMaxX) << 16);
+    }
+
+    if (FPGA_BYPASS_TO_PID_TEST) {
+        setpoint_t pidSetpoint = *effectiveSetpoint;
+        const float requestedSetpointX = pidSetpoint.position.x;
+
+        if (constraintsActive) {
+            float minX = (float)worldMinX_mm * 0.001f;
+            float maxX = (float)worldMaxX_mm * 0.001f;
+            if (minX > maxX) {
+                const float tmp = minX;
+                minX = maxX;
+                maxX = tmp;
+            }
+            pidSetpoint.position.x = clampFloat(pidSetpoint.position.x, minX, maxX);
+        }
+
+        logConstraintCommandThrottled(constraintCommandReceived,
+                                      relMinX,
+                                      relMaxX,
+                                      requestedSetpointX,
+                                      pidSetpoint.position.x);
+
+        trajStartRequested = false;
+        trajResetRequested = false;
+        controllerPid(control, &pidSetpoint, sensors, state, tick);
+        return;
     }
 
     stateToTxBuffer(effectiveSetpoint, state, sensors, txBuffer);
