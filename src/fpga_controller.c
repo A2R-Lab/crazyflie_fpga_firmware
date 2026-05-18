@@ -149,6 +149,44 @@ static void logConstraintCommandThrottled(const bool constraintCommandReceived,
               (unsigned long)commandSeenCount);
 }
 
+static void logFpgaConstraintTxThrottled(const bool constraintCommandReceived,
+                                         const int16_t relMinX,
+                                         const int16_t relMaxX,
+                                         const float effectiveSetpointX,
+                                         const float stateX)
+{
+  if (!constraintCommandReceived) {
+    return;
+  }
+
+  const uint32_t now = xTaskGetTickCount();
+  if (constraintLogHasRun && ((now - lastConstraintLogTick) < M2T(CONSTRAINT_LOG_PERIOD_MS))) {
+    return;
+  }
+
+  lastConstraintLogTick = now;
+  constraintLogHasRun = true;
+
+  const float errX = stateX - effectiveSetpointX;
+  const long errX_mm = (long)(errX * 1000.0f);
+  const bool errInside = (errX_mm >= relMinX) && (errX_mm <= relMaxX);
+
+  DEBUG_PRINT("CONSTR_FPGA: active=%u world=[%d,%d]mm x=%ldmm sp_x=%ldmm err_x=%ldmm rel=[%d,%d]mm inside=%u spi=0x%08lX cmd=(0x%08lX,0x%08lX) count=%lu\n",
+              constraintsActive ? 1 : 0,
+              (int)worldMinX_mm,
+              (int)worldMaxX_mm,
+              (long)(stateX * 1000.0f),
+              (long)(effectiveSetpointX * 1000.0f),
+              errX_mm,
+              (int)relMinX,
+              (int)relMaxX,
+              errInside ? 1 : 0,
+              (unsigned long)dynamicConstraints,
+              (unsigned long)lastCommandXBits,
+              (unsigned long)lastCommandYBits,
+              (unsigned long)commandSeenCount);
+}
+
 void appMain() {
     DEBUG_PRINT("FPGA Controller app started.\n");
     
@@ -482,6 +520,12 @@ void controllerOutOfTree(control_t *control,
         controllerPid(control, &pidSetpoint, sensors, state, tick);
         return;
     }
+
+    logFpgaConstraintTxThrottled(constraintCommandReceived,
+                                 relMinX,
+                                 relMaxX,
+                                 effectiveSetpoint->position.x,
+                                 state->position.x);
 
     stateToTxBuffer(effectiveSetpoint, state, sensors, txBuffer);
 
