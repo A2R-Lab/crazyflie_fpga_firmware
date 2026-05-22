@@ -418,7 +418,7 @@ void controllerOutOfTree(control_t *control,
         return;
     }
 
-    if(!RATE_DO_EXECUTE(RATE_500_HZ, tick))
+    if(!RATE_DO_EXECUTE(RATE_1000_HZ, tick))
     {
         return;
     }
