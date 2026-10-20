@@ -1,0 +1,15 @@
+# FPGA Controller Application Configuration
+#
+# Enable the app layer
+CONFIG_APP_ENABLE=y
+CONFIG_APP_PRIORITY=1
+CONFIG_APP_STACKSIZE=500
+
+# Enable out-of-tree controller
+CONFIG_CONTROLLER_OOT=y
+
+CONFIG_CONTROLLER_PID=y
+
+# Force-load the FPGA deck driver (since it has no OneWire memory)
+# This reserves IO1, IO2, and SPI to prevent conflicts with other decks
+CONFIG_DECK_FORCE="bcFPGA"
