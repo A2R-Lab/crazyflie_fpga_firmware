@@ -1,0 +1,28 @@
+# Build directory
+build/
+
+# Config files
+.config
+.config.old
+
+# Object files
+*.o
+
+# Command dependency files
+*.cmd
+.*.cmd
+
+# Editor and IDE files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Compiled binaries
+*.bin
+*.elf
+*.hex
+
+# Debug files
+*.dSYM/

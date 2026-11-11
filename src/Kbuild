@@ -1,0 +1,2 @@
+obj-y += fpga_controller.o
+obj-y += fpga_deck.o
